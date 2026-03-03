@@ -1,4 +1,4 @@
-package main.java.com.example.agents;
+package com.example.agents;
 
 import com.example.core.Tuple;
 import com.example.core.TupleSpace;
