@@ -23,7 +23,7 @@ public class App {
         System.out.println("🅿️  " + nbVoies + " voies de garage initialisées.");
 
         // 3. Démarrage de l'agent Opérateur (Daemon Thread)
-        Thread operatorThread = new Thread(new Operator(ts), "Operator-Thread");
+        Thread operatorThread = new Thread(new Operator(ts, nbVoies), "Operator-Thread");
         operatorThread.setDaemon(true); // S'arrêtera automatiquement à la fin du main
         operatorThread.start();
 

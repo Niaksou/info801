@@ -1,49 +1,174 @@
+PALANCA Clement
+DUQUENOY Taina
+CAGNON Leny
+
 # Compte Rendu de TP : Implémentation du Modèle Linda et Simulation de Nœud Ferroviaire
 
-## 1. Objectif du Projet
+## 1. Architecture Logicielle
 
-L'objectif de ce projet est d'implémenter un système de coordination basé sur le langage Linda pour modéliser le stationnement dans une gare ferroviaire. La simulation met en œuvre un paradigme multi-agents (Trains et Opérateur) communiquant de manière asynchrone et totalement découplée via une mémoire partagée appelée Espace de Tuples.
+### Schéma Composants/Connecteurs
 
-## 2. Architecture Logicielle
+```mermaid
+graph LR
+    subgraph Orchestration
+        App["App\n(main)"]
+    end
 
-L'architecture suit les principes de séparation des responsabilités via une arborescence de type Maven claire et modulaire :
+    subgraph Trains["Agents Train"]
+        T1["Train T1\n(Thread)"]
+        TN["Train Tn\n(Thread)"]
+    end
 
-- **`com.example.core`** : Contient l'implémentation bas niveau du middleware Linda (`TupleSpace`, `Tuple`).
-- **`com.example.agents`** : Implémente la logique métier sous forme d'agents concurrents (`Train`, `Operator`).
-- **`com.example.App`** : Le point d'entrée central orchestre la topologie réseau, l'injection des dépendances et les scénarios de test.
+    subgraph Middleware["Linda"]
+        TS[("TupleSpace\nMémoire Partagée")]
+        Tuple["Tuple\n(Pattern Matching)"]
+    end
 
-## 3. Implémentation du Noyau Linda (Thread-Safety & Synchronisation)
+    subgraph Op["Agent Opérateur"]
+        OP["Operator\n(Daemon Thread)"]
+    end
 
-Le cœur du système repose sur la classe `TupleSpace`. Contrairement aux systèmes à passage de messages classiques, le modèle Linda offre un découplage temporel et spatial total.
+    App -->|"new Thread"| T1
+    App -->|"new Thread"| TN
+    App -->|"new Thread"| OP
+    App -->|"out(voie_libre)"| TS
 
-- **Moniteur de Synchronisation** : La classe utilise les verrous intrinsèques de Java (`synchronized`) pour assurer l'atomicité des accès et des mutations sur la structure de données sous-jacente (`ArrayList`).
-- **Wait & NotifyAll** : Les primitives bloquantes (`in`, `rd`) emploient un mécanisme `wait()`. Chaque insertion (`out`) déclenche un `notifyAll()` pour réévaluer de façon sécurisée les gardes des threads mis en sommeil, garantissant l'absence de _busy-waiting_.
-- **Sondes non-bloquantes (Probes)** : L'implémentation inclut des primitives `inp` et `rdp`. Elles sont cruciales pour l'Opérateur, lui permettant de "scanner" l'état global du système sans s'interbloquer.
-- **Pattern Matching Polymorphe** : L'évaluation de correspondance est encapsulée dans `Tuple.matches()`. Afin de rendre les requêtes dynamiques, l'utilisation du mot-clé `null` agit techniquement comme un _wildcard_ (joker conditionnel), simulant le comportement d'une variable formelle dans le paradigme Linda.
+    T1 -->|"out: demande, transit_termine"| TS
+    TS -->|"in: autorisation"| T1
+    TN -->|"out: demande, transit_termine"| TS
+    TS -->|"in: autorisation"| TN
 
-## 4. Modélisation des Agents et Automates d'États
+    OP -->|"rd / rdp / in · out: autorisation"| TS
+    TS -->|"in: transit_termine"| OP
+    OP -->|"in / out: voie_libre"| TS
 
-Le système s'articule autour de threads autonomes implémentant l'interface `Runnable`.
+    TS --- Tuple
+```
+
+> **Lecture** : Le `TupleSpace` est le **connecteur central** du système. Aucun agent ne détient de référence vers un autre — toute coordination passe exclusivement par le dépôt et la lecture de tuples.
+
+## 2. Implémentation du Noyau Linda — Choix de Conception
+
+Le cœur du système repose sur la classe `TupleSpace`. Contrairement aux systèmes à passage de messages classiques, le modèle Linda offre un découplage temporel et spatial total. Les choix d'implémentation suivants ont guidé la réalisation.
+
+### Choix 1 : Sondes non-bloquantes (`rdp` / `inp`) pour l'Opérateur
+
+L'Opérateur doit prendre une décision en observant simultanément l'état de plusieurs tuples (demandes en attente et disponibilité des voies). Utiliser des primitives bloquantes (`rd`, `in`) pour cette phase d'observation conduirait à un **interblocage** : l'Opérateur se bloquerait sur la première demande introuvable et ne pourrait plus traiter les autres.
+
+### Choix 2 : Wildcard `null` comme variable formelle Linda
+
+Dans le formalisme Linda, un motif contient des _variables formelles_ (ex. `?x`) qui s'unifient avec n'importe quelle valeur. Java ne disposant pas de mécanisme d'unification natif, le `null` Java est utilisé comme joker conditionnel dans `Tuple.matches()` : un champ `null` dans le motif accepte n'importe quelle valeur dans le tuple candidat. Cela préserve la sémantique du pattern matching Linda sans dépendance externe.
+
+## 3. Modélisation des Agents et Automates d'États
+
+Le système s'articule autour de threads autonomes.
+
+### Spécification Formelle des Agents
+
+Les agents sont décrits ci-dessous dans la notation Linda. Le symbole `?` désigne une variable formelle (wildcard), `←` une liaison de résultat, et `^ω` indique une boucle infinie.
+
+**État initial de l'espace de tuples** :
+
+```
+TS₀ = { (voie_libre) × N }       -- N tuples représentant les voies disponibles
+```
+
+---
+
+**Agent Train(id : string, direction : string)**
+
+```
+Agent Train(id, direction)
+  out( demande,       id, direction ).      -- dépôt de la demande
+  in(  autorisation,  id             ).     -- attente bloquante de l'autorisation
+  out( transit_termine, id           )     -- libération du nœud
+```
+
+---
+
+**Agent Opérateur(N : int)^ω**
+
+```
+Agent Opérateur(N)
+  rd( demande, ?, ? ).                      -- attente bloquante d'une demande quelconque
+
+  let inReq  ← rdp( demande, ?, entrée ).  -- demande d'entrée ?
+  let outReq ← rdp( demande, ?, sortie ).  -- demande de sortie ?
+  let track  ← rdp( voie_libre ).          -- voie disponible ?
+
+  ([ inReq ≠ null ∧ outReq ≠ null ∧ track ≠ null ]
+      in( demande,   inReq.id, entrée ).   -- conflit → priorité ENTRÉE
+      in( voie_libre ).
+      out( autorisation, inReq.id )
+  +
+  [ inReq ≠ null ∧ outReq ≠ null ∧ track = null ]
+      in( demande,   outReq.id, sortie ).  -- conflit + parking plein → priorité SORTIE
+      out( voie_libre ).
+      out( autorisation, outReq.id )
+  +
+  [ inReq ≠ null ∧ outReq = null ∧ track ≠ null ]
+      in( demande,   inReq.id, entrée ).     -- entrée seule, voie dispo
+      in( voie_libre ).
+      out( autorisation, inReq.id )
+  +
+  [ inReq ≠ null ∧ outReq = null ∧ track = null ]
+      rd( demande, ?, sortie )             -- parking plein → attente sortie
+      → Opérateur(N)                       -- réévaluation
+  +
+  [ inReq = null ∧ outReq ≠ null ]
+      in( demande,   outReq.id, sortie ).    -- sortie seule
+      out( voie_libre ).
+      out( autorisation, outReq.id )
+  )
+  in( transit_termine, sel.id )           -- attente fin de transit (exclusion mutuelle)
+  → Opérateur(N)                           -- retour début de boucle
+```
+
+> **Propriété de sûreté** : La séquence `out(autorisation)` → `in(transit_termine)` garantit qu'un seul train occupe le nœud à la fois. Aucun verrou explicite n'est partagé entre agents — l'exclusion mutuelle est entièrement portée par le protocole de tuples.
+
+---
 
 ### L'Agent Train
 
 Chaque train modélise une machine à états stricts :
 
 1. **Émission de la demande** : Insertion asynchrone du tuple `("demande", id, direction)` via `out()`.
-2. **Attente d'autorisation** : Appel d'une primitive `in(("autorisation", id))` bloquante. Le thread du train est mis en sommeil par l'ordonnanceur de l'OS (consommation CPU nulle) jusqu'à ce que l'opérateur place le tuple exact.
+2. **Attente d'autorisation** : Appel d'une primitive `in(("autorisation", id))` bloquante. Le thread du train est mis en sommeil par l'ordonnanceur de l'OS jusqu'à ce que l'opérateur place le tuple exact.
 3. **Libération de la ressource critique** : Après le transit, l'émission du tuple `("transit_termine", id)` fonctionne comme un signal de relâchement, restituant l'accès exclusif au nœud ferroviaire.
 
-### L'Agent Opérateur : Arbitrage et Évitement des Interblocages
+### L'Agent Opérateur
 
-L'opérateur s'exécute dans un _Daemon Thread_ et gère l'accès en exclusion mutuelle au nœud ferroviaire. Son algorithme est une boucle infinie qui garantit l'application stricte du cahier des charges [file:1] :
+L'opérateur s'exécute dans un _Daemon Thread_ et gère l'accès en exclusion mutuelle au nœud ferroviaire. Son algorithme est une boucle infinie qui garantit l'application stricte du cahier des charges :
 
-- **Optimisation (Règle 1)** : L'opérateur utilise un `rd` bloquant initial sur n'importe quelle demande (`("demande", null, null)`). Si le réseau est vide, le thread s'endort proprement sans consommer de ressources [file:1].
-- **Snapshot de l'état (Règles 2 & 3)** : Réveillé, l'opérateur effectue des sondes `rdp` pour photographier l'état des demandes et la jauge de disponibilité des voies (`voie_libre`). Si l'entrée est demandée mais que le parking est plein, l'opérateur force explicitement un `rd` sur une demande de sortie, mettant en pause l'allocation pour éviter de bloquer indéfiniment l'entrée du nœud [file:1].
-- **Gestion des conflits d'allocation (Règle 4)** : Face à une demande simultanée, l'opérateur donne prioritairement le verrou logique à l'entrée afin de purger le trafic amont. Cette priorité est conditionnellement inversée au profit de la sortie si le parking est saturé [file:1]. Cette heuristique garantit la _Liveness_ (vivacité) globale du système.
+- **Optimisation** : L'opérateur utilise un `rd` bloquant initial sur n'importe quelle demande (`("demande", null, null)`). Si le réseau est vide, le thread s'endort proprement sans consommer de ressources.
+- **Snapshot de l'état** : Réveillé, l'opérateur effectue des sondes `rdp` pour photographier l'état des demandes et la jauge de disponibilité des voies (`voie_libre`). Si l'entrée est demandée mais que le parking est plein, l'opérateur force explicitement un `rd` sur une demande de sortie, mettant en pause l'allocation pour éviter de bloquer indéfiniment l'entrée du nœud.
+- **Gestion des conflits d'allocation** : Face à une demande simultanée, l'opérateur donne prioritairement le verrou logique à l'entrée afin de purger le trafic amont. Cette priorité est conditionnellement inversée au profit de la sortie si le parking est saturé. Cette heuristique garantit la vivacité globale du système.
 
-## 5. Validation par Scénario d'Intégration
+### Schéma de Séquence
 
-La méthode `App.main` met à l'épreuve les situations aux limites (_Edge Cases_) de la gestion de trafic :
+Le diagramme ci-dessous illustre le protocole complet pour un train en entrée (cas nominal) :
 
-- **Saturation des capacités** : L'espace est initialement peuplé de 2 jetons `voie_libre`. Le transit simultané de T1 et T2 consomme ces jetons et démontre l'intégrité de l'exclusion mutuelle distribuée.
-- **Inversion de priorité sur contention** : La tentative d'entrée de T3 dans le parking plein teste la résilience de l'opérateur. Ce dernier bloque l'accès entrant avec succès, jusqu'à ce que le thread de T1 injecte asynchrone une requête de sortie, forçant l'opérateur à réévaluer sa matrice de priorités et à débloquer le goulot d'étranglement.
+```mermaid
+sequenceDiagram
+    participant T  as Train T
+    participant TS as TupleSpace
+    participant OP as Opérateur
+
+    T  ->>  TS : out("demande", T, "entrée")
+    note over OP: bloqué sur rd("demande",?,?)
+    TS -->> OP : rd débloqué
+    OP ->>  TS : rdp("demande", ?, "entrée")  → inReq
+    OP ->>  TS : rdp("demande", ?, "sortie")  → null
+    OP ->>  TS : rdp("voie_libre")            → voie dispo
+    OP ->>  TS : in("demande", T, "entrée")   [consommation]
+    OP ->>  TS : in("voie_libre")             [voie occupée]
+    OP ->>  TS : out("autorisation", T)
+    note over T: bloqué sur in("autorisation", T)
+    TS -->> T  : in débloqué
+    note over T: transit en cours (1 s)
+    T  ->>  TS : out("transit_termine", T)
+    note over OP: bloqué sur in("transit_termine", T)
+    TS -->> OP : in débloqué — nœud libéré
+```
+
+> **Propriété clé** : Le nœud ferroviaire est à usage **exclusif** — l'opérateur ne délivre une nouvelle autorisation qu'après réception du tuple `transit_termine`, garantissant l'exclusion mutuelle sans verrou explicite entre agents.

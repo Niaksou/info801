@@ -85,6 +85,19 @@ public class TupleSpace {
         }
         return null;
     }
+
+    /**
+     * Compte le nombre de tuples correspondant à un motif donné.
+     */
+    public synchronized int count(Tuple pattern) {
+        int matches = 0;
+        for (Tuple t : tuples) {
+            if (t.matches(pattern)) {
+                matches++;
+            }
+        }
+        return matches;
+    }
     
     // Méthode utilitaire pour le debug
     public synchronized void debug() {

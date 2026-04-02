@@ -10,14 +10,31 @@ import com.example.core.TupleSpace;
 public class Operator implements Runnable {
 
     private final TupleSpace ts;
+    private final int totalTracks;
 
-    public Operator(TupleSpace ts) {
+    public Operator(TupleSpace ts, int totalTracks) {
         this.ts = ts;
+        this.totalTracks = totalTracks;
+    }
+
+    private void logState(String context) {
+        int waitingEntry = ts.count(new Tuple("demande", null, "entrée"));
+        int waitingExit = ts.count(new Tuple("demande", null, "sortie"));
+        int freeTracks = ts.count(new Tuple("voie_libre"));
+        int occupiedTracks = totalTracks - freeTracks;
+
+        System.out.println(
+            "📊 [État] " + context
+            + " | Trains en attente: entrée=" + waitingEntry + ", sortie=" + waitingExit
+            + " | Parking: " + occupiedTracks + "/" + totalTracks + " occupées ("
+            + freeTracks + " libre(s))"
+        );
     }
 
     @Override
     public void run() {
         System.out.println("👷 [Opérateur] en poste, prêt à gérer le trafic.");
+        logState("Initial");
         
         try {
             while (true) {
@@ -51,6 +68,7 @@ public class Operator implements Runnable {
                         selectedReq = inReq;
                     } else {
                         System.out.println("👷 [Opérateur] Parking plein. Blocage de l'entrée en attendant une sortie...");
+                        logState("Entrée bloquée (parking plein)");
                         // On bloque l'opérateur jusqu'à ce qu'un train demande à sortir
                         ts.rd(new Tuple("demande", null, "sortie"));
                         continue; // On recommence la boucle pour réévaluer la situation
@@ -74,6 +92,8 @@ public class Operator implements Runnable {
                         ts.out(new Tuple("voie_libre")); // On libère une voie
                     }
 
+                    logState("Après sélection du train " + trainId + " (" + direction + ")");
+
                     // 3. L'opérateur donne l'autorisation d'emprunter le nœud au train sélectionné
                     System.out.println("👷 [Opérateur] Autorise le Train " + trainId + " à faire sa " + direction + ".");
                     ts.out(new Tuple("autorisation", trainId));
@@ -82,6 +102,7 @@ public class Operator implements Runnable {
                     // (le nœud est à usage unique et exclusif)
                     ts.in(new Tuple("transit_termine", trainId));
                     System.out.println("👷 [Opérateur] Le nœud est de nouveau libre.");
+                    logState("Après transit terminé de " + trainId);
                 }
             }
         } catch (InterruptedException e) {
